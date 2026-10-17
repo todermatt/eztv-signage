@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EZTV Digital Signage</title>
+  
+  <style>
+    /* Reset & Base Styles */
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #display-root {
+      background-color: #0f172a !important;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+    
+    /* PASTE ANY CUSTOM CSS FROM YOUR DisplayPage.html HERE IF NEEDED */
+  </style>
+</head>
+<body style="background-color: #0f172a;">
+
+  <div id="display-root"></div>
+
+  <script>
+    // -------------------------------------------------------------
+    // 1. CONFIGURATION: Replace with your deployed Apps Script Web App URL
+    // -------------------------------------------------------------
+    const APPS_SCRIPT_API_URL = "https://script.google.com/macros/s/AKfycbyjdF5-gb4wT9GLhfukZmqkbBVA0hqhTXNjUjXsposZOvpqko4edc5mCGDqryFlrZoLdA/exec";
+
+    function getUrlParam(key) {
+      const urlParams = new URLSearchParams(window.location.search);
+      return urlParams.get(key) || '';
+    }
+
+    const SCREEN_ID = getUrlParam('screen') || 'office';
+    const TARGET_DATE = getUrlParam('date') || '';
+
+    // Watchdog timer for blank state
+    window.addEventListener('DOMContentLoaded', function() {
+      setTimeout(function() {
+        var root = document.getElementById('display-root');
+        if (!root || root.children.length === 0) {
+          console.warn("Blank render state detected. Retrying load...");
+          window.location.reload(true);
+        }
+      }, 10000);
+    });
+
+    window.onerror = function(msg, url, line) {
+      var root = document.getElementById("display-root");
+      if (root) {
+        root.innerHTML =
+          '<div style="padding:40px; color:#dc2626; text-align:center; background:#0f172a; min-height:100vh; box-sizing:border-box;">' +
+          '<h2 style="font-size:1.5rem; margin-bottom:8px;">⚠️ Display Script Error</h2>' +
+          '<p style="font-weight:bold; font-size:1.1rem; color:#f87171;">' + escapeHtml(msg) + '</p>' +
+          '<p style="color:#94a3b8; margin-top:8px;">Line: ' + line + '</p>' +
+          '</div>';
+      }
+      return false;
+    };
+
+    // -------------------------------------------------------------
+    // 2. SELF-HEALING DATA FETCH ENGINE (fetch + localStorage)
+    // -------------------------------------------------------------
+    function initDisplay() {
+      // Step A: Immediately render cached data from local memory (0ms load time)
+      const cacheKey = 'signage_cache_' + SCREEN_ID;
+      const cachedRaw = localStorage.getItem(cacheKey);
+      if (cachedRaw) {
+        try {
+          const cachedData = JSON.parse(cachedRaw);
+          renderScreen(cachedData);
+        } catch (e) {
+          console.warn("Failed to parse local storage cache:", e);
+        }
+      }
+
+      // Step B: Fetch fresh JSON data from Google Apps Script in background
+      fetchAndRender();
+
+      // Step C: Poll for fresh data every 5 minutes without reloading browser
+      setInterval(fetchAndRender, 300000);
+    }
+
+    function fetchAndRender() {
+      const cacheKey = 'signage_cache_' + SCREEN_ID;
+      const apiUrl = APPS_SCRIPT_API_URL + '?api=true&screen=' + encodeURIComponent(SCREEN_ID) + '&date=' + encodeURIComponent(TARGET_DATE);
+
+      fetch(apiUrl)
+        .then(function(response) {
+          if (!response.ok) throw new Error("HTTP Status " + response.status);
+          return response.json();
+        })
+        .then(function(data) {
+          if (data && !data.error) {
+            localStorage.setItem(cacheKey, JSON.stringify(data));
+            renderScreen(data);
+          }
+        })
+        .catch(function(err) {
+          console.warn("Background API fetch failed. Keeping cached view:", err);
+        });
+    }
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", initDisplay);
+    } else {
+      initDisplay();
+    }
+
+    // -------------------------------------------------------------
+    // 3. UTILITY FUNCTIONS
+    // -------------------------------------------------------------
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function formatImageUrl(url) {
+      if (!url) return '';
+      var driveMatch = url.match(/\/d\/([a-zA-Z0-9_-]+)/) || url.match(/id=([a-zA-Z0-9_-]+)/);
+      if (driveMatch && driveMatch[1]) {
+        return 'https://lh3.googleusercontent.com/d/' + driveMatch[1];
+      }
+      return url;
+    }
+
+    function formatCalendarItems(calendarData) {
+      if (!calendarData) return '<div class="fo-calendar-item">No special events scheduled today.</div>';
+      var rawItems = [];
+
+      if (Array.isArray(calendarData)) {
+        rawItems = calendarData;
+      } else if (typeof calendarData === 'object' && calendarData !== null) {
+        if (Array.isArray(calendarData.items)) rawItems = calendarData.items;
+        else if (Array.isArray(calendarData.events)) rawItems = calendarData.events;
+        else if (Array.isArray(calendarData.data)) rawItems = calendarData.data;
+        else rawItems = [calendarData];
+      } else if (typeof calendarData === 'string') {
+        try {
+          return formatCalendarItems(JSON.parse(calendarData));
+        } catch(e) {
+          rawItems = calendarData.split(/\r?\n|\||;|•|\u2022/);
+        }
+      }
+
+      var filtered = [];
+      for (var i = 0; i < rawItems.length; i++) {
+        var ev = rawItems[i];
+        if (!ev) continue;
+        if (typeof ev === 'object' && ev !== null) {
+          var title = ev.summary || ev.title || ev.name || ev.event || '';
+          var time = ev.time || ev.start || ev.startTime || '';
+          if (typeof time === 'object' && time !== null) {
+            if (time.dateTime) {
+              time = new Date(time.dateTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+            } else if (time.date) {
+              time = '';
+            }
+          }
+          var formattedStr = (time && title) ? time + ' - ' + title : (title || String(ev));
+          formattedStr = formattedStr.replace(/^[•\s\-\*]+/, '').trim();
+          if (formattedStr) filtered.push(formattedStr);
+        } else {
+          var str = String(ev).replace(/^[•\s\-\*]+/, '').trim();
+          if (str.length > 0) filtered.push(str);
+        }
+      }
+
+      if (filtered.length === 0) return '<div class="fo-calendar-item">No special events scheduled today.</div>';
+
+      return filtered.map(function(item) {
+        return '<div class="fo-calendar-item">• ' + escapeHtml(item) + '</div>';
+      }).join('');
+    }
+
+    // -------------------------------------------------------------
+    // 4. SCREEN ROUTER
+    // -------------------------------------------------------------
+    function renderScreen(data) {
+      if (!data) return;
+
+      if (window.photoCarouselTimer) {
+        clearInterval(window.photoCarouselTimer);
+        window.photoCarouselTimer = null;
+      }
+
+      try {
+        var root = document.getElementById("display-root");
+        if (!root) return;
+
+        var cleanId = (SCREEN_ID || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+        if (cleanId.indexOf('office') !== -1 || cleanId === 'frontoffice') {
+          renderFrontOffice(root, data);
+        } else if (cleanId.indexOf('serving') !== -1 || cleanId.indexOf('serve') !== -1) {
+          renderServingLine(root, data);
+        } else if (cleanId.indexOf('cafeterianotices') !== -1 || cleanId.indexOf('cafenotices') !== -1 || cleanId.indexOf('notices') !== -1) {
+          renderCafeteriaNotices(root, data);
+        } else if (cleanId.indexOf('cafeteria') !== -1 || cleanId.indexOf('cafe') !== -1) {
+          renderCafeteria(root, data);
+        } else if (cleanId.indexOf('mediacenterbooks') !== -1 || cleanId.indexOf('mcbooks') !== -1 || cleanId.indexOf('books') !== -1) {
+          renderMediaCenterBooks(root, data);
+        } else if (cleanId.indexOf('media') !== -1 || cleanId.indexOf('library') !== -1) {
+          renderMediaCenter(root, data);
+        } else if (cleanId.indexOf('photo') !== -1 || cleanId.indexOf('gallery') !== -1) {
+          renderPhotoScreen(root, data);
+        } else {
+          renderGenericScreen(root, data);
+        }
+      } catch (err) {
+        var rootElem = document.getElementById("display-root");
+        if (rootElem) {
+          rootElem.innerHTML =
+            '<div style="padding:40px; color:#dc2626; text-align:center; background:#0f172a; min-height:100vh;">' +
+            '<h2 style="font-size:1.5rem; margin-bottom:8px;">⚠️ Screen Rendering Exception</h2>' +
+            '<p style="font-weight:bold; font-size:1.1rem; color:#f87171;">' + escapeHtml(err.message || err) + '</p>' +
+            '<p style="color:#94a3b8; margin-top:8px;">Screen: ' + escapeHtml(SCREEN_ID) + '</p>' +
+            '</div>';
+        }
+      }
+    }
+
+    /* ==========================================================================
+    1. FRONT OFFICE SCREEN (?screen=office)
+    ========================================================================== */
+    function renderFrontOffice(root, data) {
+      var flyerUrl = formatImageUrl(data.flyerUrl || data.flyer || data.flyerImage || '');
+      var logoUrl = 'https://resources.finalsite.net/images/f_auto,q_auto,t_image_size_6/v1756393409/slpschoolsorg/bvhthjsaur1ivullmwjn/PeterHobartLogoColor.jpg';
+
+      var cardTitleSize        = '1.5rem';
+      var announcementTextSize = '1.2rem';
+      var calendarTextSize     = '1.2rem';
+      var menuTextSize         = '1.2rem';
+      var flyerFallbackSize    = '1.1rem';
+
+      var catColorBkm  = '#231f20';
+      var catColorHot  = '#231f20';
+      var catColorDeli = '#231f20';
+      var catColorVeg  = '#231f20';
+
+      var flyerHtml = flyerUrl
+        ? '<img src="' + flyerUrl + '" class="fo-flyer-img" alt="Flyer" onerror="this.style.display=\'none\'">'
+        : '<div style="color:#ffffff; font-weight:700; font-size:' + flyerFallbackSize + ' !important;">📄 No active flyer</div>';
+
+      var menuLinesHtml = '';
+      var bkm  = data.todayBreakfast || data.breakfast;
+      var hot  = data.todayHot || data.hot || data.hotEntree;
+      var deli = data.todaySandwich || data.deli || data.sandwich;
+      var veg  = data.todayVeg || data.todayVegetarian || data.veg;
+
+      if (bkm || hot || deli || veg) {
+        var items = [];
+        if (bkm) items.push('<span style="color:' + catColorBkm + '; font-weight:700;">Breakfast:</span> ' + escapeHtml(bkm));
+        if (hot) items.push('<span style="color:' + catColorHot + '; font-weight:700;">Main Entree:</span> ' + escapeHtml(hot));
+        if (deli) items.push('<span style="color:' + catColorDeli + '; font-weight:700;">Sandwich:</span> ' + escapeHtml(deli));
+        if (veg) items.push('<span style="color:' + catColorVeg + '; font-weight:700;">Vegetarian:</span> ' + escapeHtml(veg));
+        menuLinesHtml = items.map(function(item) { return '<div style="margin-bottom:8px;">' + item + '</div>'; }).join('');
+      } else if (data.menuSummary) {
+        menuLinesHtml = data.menuSummary.split('|').map(function(item) { return '<div style="margin-bottom:8px;">' + escapeHtml(item.trim()) + '</div>'; }).join('');
+      } else {
+        menuLinesHtml = '<div style="font-weight:600; opacity:0.8;">No menu published for today</div>';
+      }
+
+      root.innerHTML =
+        '<div class="fo-container" style="min-height:100vh; display:flex; flex-direction:column; box-sizing:border-box;">' +
+        '  <div class="slp-frame-top"></div>' +
+        '  <div class="fo-grid">' +
+        '    <div></div>' +
+        '    <div class="fo-center-stack">' +
+        '      <div class="fo-logo-card"><img src="' + logoUrl + '" class="fo-logo-img" alt="Peter Hobart Logo"></div>' +
+        '      <div class="fo-card announcements">' +
+        '        <div class="fo-card-title" style="font-size:' + cardTitleSize + ' !important;">📢 ANNOUNCEMENTS</div>' +
+        '        <div class="fo-card-body" style="font-size:' + announcementTextSize + ' !important;">' + escapeHtml(data.announcement || 'Welcome visitors! Please check in at main desk.') + '</div>' +
+        '      </div>' +
+        '      <div class="fo-card calendar">' +
+        '        <div class="fo-card-title" style="font-size:' + cardTitleSize + ' !important;">📅 CALENDAR ITEMS</div>' +
+        '        <div class="fo-card-body" style="font-size:' + calendarTextSize + ' !important;">' + formatCalendarItems(data.calendar) + '</div>' +
+        '      </div>' +
+        '      <div class="fo-card menu">' +
+        '        <div class="fo-card-title" style="font-size:' + cardTitleSize + ' !important;">🍽️ TODAY\'S LUNCH SUMMARY</div>' +
+        '        <div class="fo-card-body" style="font-size:' + menuTextSize + ' !important; display:flex; flex-direction:column;">' + menuLinesHtml + '</div>' +
+        '      </div>' +
+        '    </div>' +
+        '    <div class="fo-flyer-zone">' + flyerHtml + '</div>' +
+        '  </div>' +
+        '  <div class="slp-frame-bottom"></div>' +
+        '</div>';
+    }
+
+    /* ==========================================================================
+    2. SERVING LINE SCREEN (?screen=serving)
+    ========================================================================== */
+    function renderServingLine(root, data) {
+      var dateHeading = data.todayDateLabel || new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+      var logoUrl = 'https://resources.finalsite.net/images/f_auto,q_auto,t_image_size_6/v1756395496/slpschoolsorg/amh2h2pn704tof9bg1ht/Oriolelogo.png';
+      var defaultImgId = '1-u1ADJzJdH4ZnBveegH3nMVWDsAp15BW';
+      var procImgUrl = formatImageUrl(data.procedureImgUrl || data.procedureImg || ('https://drive.google.com/thumbnail?id=' + defaultImgId + '&sz=w1000'));
+
+      var bannerTitleSize  = '2.4rem';
+      var dateHeadingSize  = '2.0rem';
+      var categoryTagSize   = '1.8rem';
+      var itemTitleSize     = '2.2rem';
+      var itemDescSize      = '1.4rem';
+      var menuItemImgHeight = '250px';
+      var procTitleSize    = '1.8rem';
+      var procTextSize     = '1.8rem';
+
+      var bkmTitle  = escapeHtml(data.todayBreakfast || data.breakfast || data.bkmTitle || (data.menu && data.menu.breakfast) || '');
+      var bkmDesc   = escapeHtml(data.todayBreakfastDesc || data.breakfastDesc || '');
+      var bkmImg    = formatImageUrl(data.todayBreakfastImg || data.breakfastImg || '');
+
+      var hotTitle  = escapeHtml(data.todayHot || data.hot || data.hotLine || data.hotEntree || (data.menu && data.menu.hot) || '');
+      var hotDesc   = escapeHtml(data.todayHotDesc || data.hotDesc || '');
+      var hotImg    = formatImageUrl(data.todayHotImg || data.hotImg || '');
+
+      var deliTitle = escapeHtml(data.todaySandwich || data.todayDeli || data.deli || data.sandwich || data.deliLine || (data.menu && data.menu.deli) || '');
+      var deliDesc  = escapeHtml(data.todaySandwichDesc || data.deliDesc || data.sandwichDesc || '');
+      var deliImg   = formatImageUrl(data.todaySandwichImg || data.deliImg || data.sandwichImg || '');
+
+      var vegTitle  = escapeHtml(data.todayVeg || data.veg || data.vegetarian || (data.menu && data.menu.veg) || '');
+      var vegDesc   = escapeHtml(data.todayVegDesc || data.vegDesc || '');
+      var vegImg    = formatImageUrl(data.todayVegImg || data.vegImg || '');
+
+      root.innerHTML =
+        '<div class="srv-container" style="min-height:100vh; display:flex; flex-direction:column; box-sizing:border-box;">' +
+        '  <div class="slp-frame-top"></div>' +
+        '  <div class="srv-header">' +
+        '    <div></div>' +
+        '    <div class="srv-banner">' +
+        '      <h1 style="font-size:' + bannerTitleSize + ' !important;">Menu for Today</h1>' +
+        '      <p style="font-size:' + dateHeadingSize + ' !important;">' + escapeHtml(dateHeading) + '</p>' +
+        '    </div>' +
+        '    <img src="' + logoUrl + '" class="srv-logo-img" style="transform: scaleX(-1);" alt="Oriole Logo">' +
+        '  </div>' +
+        '  <div class="srv-body">' +
+        '    <div class="srv-menu-grid" style="display:grid !important; grid-template-columns: repeat(4, minmax(0, 1fr)) !important; gap: 16px !important;">' +
+        '      <div class="srv-menu-card bkm" style="min-width:0 !important;">' +
+        '        <div class="srv-tag" style="color:#f97316; font-size:' + categoryTagSize + ' !important;">BREAKFAST</div>' +
+        '        <div class="srv-item-title" style="font-size:' + itemTitleSize + ' !important;">' + bkmTitle + '</div>' +
+        '        <div class="srv-item-desc" style="font-size:' + itemDescSize + ' !important;">' + bkmDesc + '</div>' +
+                 (bkmImg ? '<img src="' + bkmImg + '" class="srv-item-img" style="max-height:' + menuItemImgHeight + '; object-fit:contain;" alt="Breakfast">' : '') +
+        '      </div>' +
+        '      <div class="srv-menu-card hot" style="min-width:0 !important;">' +
+        '        <div class="srv-tag" style="color:#f97316; font-size:' + categoryTagSize + ' !important;">Main Entree</div>' +
+        '        <div class="srv-item-title" style="font-size:' + itemTitleSize + ' !important;">' + hotTitle + '</div>' +
+        '        <div class="srv-item-desc" style="font-size:' + itemDescSize + ' !important;">' + hotDesc + '</div>' +
+                 (hotImg ? '<img src="' + hotImg + '" class="srv-item-img" style="max-height:' + menuItemImgHeight + '; object-fit:contain;" alt="Main Entree">' : '') +
+        '      </div>' +
+        '      <div class="srv-menu-card deli" style="min-width:0 !important;">' +
+        '        <div class="srv-tag" style="color:#3b82f6; font-size:' + categoryTagSize + ' !important;">Sandwich</div>' +
+        '        <div class="srv-item-title" style="font-size:' + itemTitleSize + ' !important;">' + deliTitle + '</div>' +
+        '        <div class="srv-item-desc" style="font-size:' + itemDescSize + ' !important;">' + deliDesc + '</div>' +
+                 (deliImg ? '<img src="' + deliImg + '" class="srv-item-img" style="max-height:' + menuItemImgHeight + '; object-fit:contain;" alt="Deli">' : '') +
+        '      </div>' +
+        '      <div class="srv-menu-card veg" style="min-width:0 !important;">' +
+        '        <div class="srv-tag" style="color:#22c55e; font-size:' + categoryTagSize + ' !important;">VEGETARIAN</div>' +
+        '        <div class="srv-item-title" style="font-size:' + itemTitleSize + ' !important;">' + vegTitle + '</div>' +
+        '        <div class="srv-item-desc" style="font-size:' + itemDescSize + ' !important;">' + vegDesc + '</div>' +
+                 (vegImg ? '<img src="' + vegImg + '" class="srv-item-img" style="max-height:' + menuItemImgHeight + '; object-fit:contain;" alt="Vegetarian">' : '') +
+        '      </div>' +
+        '    </div>' +
+        '    <div class="srv-bottom-grid" style="display:grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 16px !important; margin-top: 16px !important;">' +
+        '      <div class="srv-proc-card" style="grid-column: 1 / 2 !important; width: 100% !important; box-sizing: border-box !important;">' +
+        '        <h2 style="font-size:' + procTitleSize + ' !important; margin-bottom:10px;">SERVING LINE PROCEDURES</h2>' +
+        '        <div class="srv-proc-text" style="font-size:' + procTextSize + ' !important; white-space:pre-line;">' + escapeHtml(data.procedureText || "• Take 1 tray\n• Select 1 entree\n• Choose fruit & vegetables\n• Pick 1 milk") + '</div>' +
+        '      </div>' +
+        '      <div class="srv-img-card" style="grid-column: 2 / 3 !important; width: 100% !important; height: 100% !important; display: flex !important; align-items: center !important; justify-content: center !important; box-sizing: border-box !important; background: #ffffff; border-radius: 12px; padding: 12px; overflow: hidden !important;">' +
+        '        <img src="' + procImgUrl + '" style="width: 100% !important; height: 100% !important; max-width: 100% !important; max-height: 100% !important; object-fit: contain !important;" alt="Procedures Visual">' +
+        '      </div>' +
+        '    </div>' +
+        '  </div>' +
+        '  <div class="slp-frame-bottom"></div>' +
+        '</div>';
+    }
+
+    /* ==========================================================================
+    3A. CAFETERIA MAIN SCREEN (?screen=cafeteria)
+    ========================================================================== */
+    function renderCafeteria(root, data) {
+      var logoUrl = 'https://resources.finalsite.net/images/f_auto,q_auto,t_image_size_6/v1756395496/slpschoolsorg/amh2h2pn704tof9bg1ht/Oriolelogo.png';
+
+      var headerTitleSize    = '2.4rem';
+      var headerSubtitleSize = '1.8rem';
+      var cardTitleSize      = '1.5rem';
+      var categoryTitleSize  = '1.8rem';
+      var menuSize           = data.cafMenuFontSize || '2.0rem';
+      var menuImgWidth       = '100px';
+      var menuImgHeight      = '100px';
+      var flyerFallbackSize  = '1.1rem';
+
+      var rawFlyer = data.cafeteriaFlyerUrl || data.cafFlyerUrl || data.cafFlyer || data.cafeteriaFlyer || '';
+      var cafFlyerUrl = formatImageUrl(rawFlyer);
+
+      var tomHot = escapeHtml(data.tomorrowHot || data.nextHot || '');
+      var tomHotImg = formatImageUrl(data.tomorrowHotImg || data.nextHotImg);
+
+      var tomSand = escapeHtml(data.tomorrowSandwich || data.nextSandwich || '');
+      var tomSandImg = formatImageUrl(data.tomorrowSandwichImg || data.nextSandwichImg);
+
+      var tomVeg = escapeHtml(data.tomorrowVeg || data.nextVeg || data.tomorrowVegetarian || data.nextVegetarian || '');
+      var tomVegImg = formatImageUrl(data.tomorrowVegImg || data.nextVegImg || data.tomorrowVegetarianImg || data.nextVegetarianImg || data.vegImg || data.vegetarianImg);
+
+      var tomBfast = escapeHtml(data.tomorrowBreakfast || data.nextBreakfast || '');
+      var tomBfastImg = formatImageUrl(data.tomorrowBreakfastImg || data.nextBreakfastImg);
+
+      var dateLabel = escapeHtml(data.tomorrowDateLabel || 'Tomorrow');
+
+      var flyerHtml = cafFlyerUrl
+        ? '<img src="' + cafFlyerUrl + '" style="width:100%; height:100%; object-fit:contain; border-radius:8px;" alt="Cafeteria Flyer" onerror="this.style.display=\'none\'">'
+        : '<div style="color:#64748b; font-weight:700; font-size:' + flyerFallbackSize + ' !important; display:flex; align-items:center; justify-content:center; height:100%;">📄 No flyer currently uploaded</div>';
+
+      root.innerHTML =
+        '<div class="caf-container" style="min-height:100vh; display:flex; flex-direction:column; box-sizing:border-box;">' +
+        '  <div class="slp-frame-top"></div>' +
+        '  <div class="caf-header">' +
+        '    <div></div>' +
+        '    <div class="caf-banner">' +
+        '      <h1 style="font-size:' + headerTitleSize + ' !important;">PETER HOBART CAFETERIA</h1>' +
+        '      <p style="font-size:' + headerSubtitleSize + ' !important;">NEXT DAY MENU & ANNOUNCEMENTS</p>' +
+        '    </div>' +
+        '    <img src="' + logoUrl + '" class="caf-logo-img" style="transform: scaleX(-1);" alt="Oriole Logo">' +
+        '  </div>' +
+        '  <div class="caf-body" style="flex:1; display:flex; gap:24px; padding:20px; min-height:0;">' +
+        '    <div class="caf-card" style="flex:1; display:flex; flex-direction:column; background:rgba(255,255,255,0.95); border-radius:18px; box-shadow:0 10px 25px rgba(0,0,0,0.15); overflow:hidden;">' +
+        '      <div class="caf-card-title" style="background:#3bbede; color:#ffffff; font-size:' + cardTitleSize + ' !important;">📋 TOMORROW\'S MENU (' + dateLabel.toUpperCase() + ')</div>' +
+        '      <div class="caf-card-body" style="flex:1; display:flex; flex-direction:column; justify-content:space-around; padding:20px; gap:12px;">' +
+        '        <div style="display:flex; align-items:center; gap:16px; background:#ffffff; padding:12px 16px; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.06);">' +
+        '          ' + (tomBfastImg ? '<img src="' + tomBfastImg + '" style="width:' + menuImgWidth + '; height:' + menuImgHeight + '; object-fit:cover; border-radius:8px;" alt="Breakfast">' : '') +
+        '          <div><div class="caf-menu-category" style="color:#3bbede; font-size:' + categoryTitleSize + ' !important; font-weight:700;">Breakfast</div><div class="caf-menu-item-name" style="font-size:' + menuSize + ' !important;">' + tomBfast + '</div></div>' +
+        '        </div>' +
+        '        <div style="display:flex; align-items:center; gap:16px; background:#ffffff; padding:12px 16px; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.06);">' +
+        '          ' + (tomHotImg ? '<img src="' + tomHotImg + '" style="width:' + menuImgWidth + '; height:' + menuImgHeight + '; object-fit:cover; border-radius:8px;" alt="Hot Entree">' : '') +
+        '          <div><div class="caf-menu-category" style="color:#f36d24; font-size:' + categoryTitleSize + ' !important; font-weight:700;">Hot Entree</div><div class="caf-menu-item-name" style="font-size:' + menuSize + ' !important;">' + tomHot + '</div></div>' +
+        '        </div>' +
+        '        <div style="display:flex; align-items:center; gap:16px; background:#ffffff; padding:12px 16px; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.06);">' +
+        '          ' + (tomSandImg ? '<img src="' + tomSandImg + '" style="width:' + menuImgWidth + '; height:' + menuImgHeight + '; object-fit:cover; border-radius:8px;" alt="Deli Option">' : '') +
+        '          <div><div class="caf-menu-category" style="color:#7189b9; font-size:' + categoryTitleSize + ' !important; font-weight:700;">Sandwich</div><div class="caf-menu-item-name" style="font-size:' + menuSize + ' !important;">' + tomSand + '</div></div>' +
+        '        </div>' +
+        '        <div style="display:flex; align-items:center; gap:16px; background:#ffffff; padding:12px 16px; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.06);">' +
+        '          ' + (tomVegImg ? '<img src="' + tomVegImg + '" style="width:' + menuImgWidth + '; height:' + menuImgHeight + '; object-fit:cover; border-radius:8px;" alt="Vegetarian Option">' : '') +
+        '          <div><div class="caf-menu-category" style="color:#99cc66; font-size:' + categoryTitleSize + ' !important; font-weight:700;">Vegetarian</div><div class="caf-menu-item-name" style="font-size:' + menuSize + ' !important;">' + tomVeg + '</div></div>' +
+        '        </div>' +
+        '      </div>' +
+        '    </div>' +
+        '    <div class="caf-card" style="flex:1; display:flex; flex-direction:column; background:rgba(255,255,255,0.95); border-radius:18px; box-shadow:0 10px 25px rgba(0,0,0,0.15); overflow:hidden;">' +
+        '      <div class="caf-card-title" style="background:#7189b9; color:#ffffff; font-size:' + cardTitleSize + ' !important;">📢 CAFETERIA ANNOUNCEMENT</div>' +
+        '      <div class="caf-card-body" style="flex:1; display:flex; align-items:center; justify-content:center; padding:12px; min-height:0;">' +
+                 flyerHtml +
+        '      </div>' +
+        '    </div>' +
+        '  </div>' +
+        '  <div class="slp-frame-bottom"></div>' +
+        '</div>';
+    }
+
+    /* ==========================================================================
+    3B. CAFETERIA NOTICES SCREEN (?screen=cafeterianotices)
+    ========================================================================== */
+    function renderCafeteriaNotices(root, data) {
+      var logoUrl = 'https://resources.finalsite.net/images/f_auto,q_auto,t_image_size_6/v1756395496/slpschoolsorg/amh2h2pn704tof9bg1ht/Oriolelogo.png';
+
+      var recessSize = '2.5rem';
+      var noticeSize = '2.5rem';
+
+      var recessText = escapeHtml(data.recessNews || data.recessNewsText || data.recessText || data.recess || 'Dress for the weather! Outdoor recess is active today.');
+      var rawRecessImg = data.recessImg || data.recessImage || data.recessNewsImg || data.recessUrl || '';
+      var recessImg = formatImageUrl(rawRecessImg);
+
+      var cafNoticeText = escapeHtml(data.cafNotice || data.generalNotice || data.cafNoticeText || data.cafeteriaNotice || 'Please remember to use indoor voices and clean your table area before leaving.');
+      var rawCafNoticeImg = data.cafNoticeImg || data.generalNoticeImg || data.noticeImg || data.cafNoticeUrl || '';
+      var cafNoticeImg = formatImageUrl(rawCafNoticeImg);
+
+      root.innerHTML =
+        '<div class="caf-container" style="min-height:100vh; display:flex; flex-direction:column; box-sizing:border-box;">' +
+        '  <div class="slp-frame-top"></div>' +
+        '  <div class="caf-header">' +
+        '    <div></div>' +
+        '    <div class="caf-banner"><h1>PETER HOBART CAFETERIA</h1><p>ANNOUNCEMENTS & NOTICES</p></div>' +
+        '    <img src="' + logoUrl + '" class="caf-logo-img" style="transform: scaleX(-1);" alt="Oriole Logo">' +
+        '  </div>' +
+        '  <div class="caf-body" style="flex:1; display:flex; gap:24px; padding:20px;">' +
+        '    <div class="caf-card" style="flex:1; display:flex; flex-direction:column; background:rgba(255,255,255,0.95); border-radius:18px; box-shadow:0 10px 25px rgba(0,0,0,0.15); overflow:hidden;">' +
+        '      <div class="caf-card-title" style="background:#99cc66; color:#231f20;">🛝 RECESS NEWS & ANNOUNCEMENTS</div>' +
+        '      <div class="caf-card-body" style="flex:1; display:flex; flex-direction:column; justify-content:space-between; padding:28px;">' +
+        '        <div class="caf-notice-body" style="font-size:' + recessSize + ' !important;">' + recessText + '</div>' +
+        '        ' + (recessImg ? '<div style="margin-top:20px; text-align:center;"><img src="' + recessImg + '" style="max-height:280px; max-width:100%; object-fit:contain; border-radius:12px; box-shadow:0 4px 12px rgba(0,0,0,0.1);" alt="Recess Graphic"></div>' : '') +
+        '      </div>' +
+        '    </div>' +
+        '    <div class="caf-card" style="flex:1; display:flex; flex-direction:column; background:rgba(255,255,255,0.95); border-radius:18px; box-shadow:0 10px 25px rgba(0,0,0,0.15); overflow:hidden;">' +
+        '      <div class="caf-card-title" style="background:#f36d24; color:#ffffff;">📢 GENERAL CAFETERIA NOTICE</div>' +
+        '      <div class="caf-card-body" style="flex:1; display:flex; flex-direction:column; justify-content:space-between; padding:28px;">' +
+        '        <div class="caf-notice-body" style="font-size:' + noticeSize + ' !important;">' + cafNoticeText + '</div>' +
+        '        ' + (cafNoticeImg ? '<div style="margin-top:20px; text-align:center;"><img src="' + cafNoticeImg + '" style="max-height:280px; max-width:100%; object-fit:contain; border-radius:12px; box-shadow:0 4px 12px rgba(0,0,0,0.1);" alt="Notice Graphic"></div>' : '') +
+        '      </div>' +
+        '    </div>' +
+        '  </div>' +
+        '  <div class="slp-frame-bottom"></div>' +
+        '</div>';
+    }
+
+    /* ==========================================================================
+    4A. MEDIA CENTER MAIN SCREEN (?screen=mediacenter)
+    ========================================================================== */
+    function renderMediaCenter(root, data) {
+      var logoUrl = 'https://resources.finalsite.net/images/f_auto,q_auto,t_image_size_6/v1756395496/slpschoolsorg/amh2h2pn704tof9bg1ht/Oriolelogo.png';
+
+      var headerTitleSize    = '2.4rem';
+      var headerSubtitleSize = '1.8rem';
+      var cardTitleSize      = '1.5rem';
+      var schedTextSize      = '1.4rem';
+      var prideTextSize      = '1.3rem';
+      var prideBadgeSize     = '1.3rem';
+      var flyerFallbackSize  = '1.1rem';
+
+      var rawFlyer = data.mediaFlyerUrl || data.mediaFlyer || data.mcFlyerUrl || data.mcFlyer || data.flyerUrl || data.flyer || data.flyerImage || '';
+      var mcFlyerUrl = formatImageUrl(rawFlyer);
+
+      var flyerHtml = mcFlyerUrl
+        ? '<img src="' + mcFlyerUrl + '" class="mc-flyer-img" style="max-width:100%; max-height:100%; object-fit:contain; border-radius:8px; display:block; margin:auto;" alt="Media Center Flyer" onerror="this.style.display=\'none\'">'
+        : '<div style="color:#64748b; font-weight:700; font-size:' + flyerFallbackSize + ' !important; display:flex; align-items:center; justify-content:center; height:100%;">📄 No flyer currently uploaded</div>';
+
+      var scheduleHtml = '';
+      if (data.schedule && Array.isArray(data.schedule)) {
+        scheduleHtml = '<ul class="mc-sched-list" style="font-size:' + schedTextSize + ' !important;">' + data.schedule.map(function(s) {
+          return '<li class="mc-sched-item"><strong>' + escapeHtml(s.time || '') + '</strong>' + escapeHtml(s.event || s.class || s) + '</li>';
+        }).join('') + '</ul>';
+      } else {
+        scheduleHtml = '<div class="mc-sched-text" style="font-size:' + schedTextSize + ' !important;">' + escapeHtml(data.schedule || 'Open for book checkout and class research all day.') + '</div>';
+      }
+
+      root.innerHTML =
+        '<div class="mc-container" style="min-height:100vh; display:flex; flex-direction:column; box-sizing:border-box;">' +
+        '  <div class="slp-frame-top"></div>' +
+        '  <div class="mc-header">' +
+        '    <div></div>' +
+        '    <div class="mc-banner">' +
+        '      <h1 style="font-size:' + headerTitleSize + ' !important;">PETER HOBART MEDIA CENTER</h1>' +
+        '      <p style="font-size:' + headerSubtitleSize + ' !important;">EXPLORE • LEARN • CREATE</p>' +
+        '    </div>' +
+        '    <img src="' + logoUrl + '" class="mc-logo-img" style="transform: scaleX(-1);" alt="Oriole Logo">' +
+        '  </div>' +
+        '  <div class="mc-body" style="flex:1; display:flex; gap:24px; padding:20px; min-height:0;">' +
+        '    <div class="mc-left-col" style="flex:1; display:flex; flex-direction:column; gap:24px;">' +
+        '      <div class="mc-card card-schedule" style="flex:1; display:flex; flex-direction:column; background:rgba(255,255,255,0.95); border-radius:18px; box-shadow:0 10px 25px rgba(0,0,0,0.15); overflow:hidden;">' +
+        '        <div class="mc-card-title" style="font-size:' + cardTitleSize + ' !important;">📅 TODAY\'S MEDIA SCHEDULE</div>' +
+        '        <div class="mc-card-body" style="padding:16px;">' + scheduleHtml + '</div>' +
+        '      </div>' +
+        '      <div class="mc-card card-pride" style="flex:1.2; display:flex; flex-direction:column; background:rgba(255,255,255,0.95); border-radius:18px; box-shadow:0 10px 25px rgba(0,0,0,0.15); overflow:hidden;">' +
+        '        <div class="mc-card-title" style="font-size:' + cardTitleSize + ' !important;">📖 MEDIA CENTER PRIDE</div>' +
+        '        <div class="mc-card-body" style="padding:16px;">' +
+        '          <div class="mc-pride-list">' +
+        '            <div class="mc-pride-item"><div class="mc-pride-badge" style="font-size:' + prideBadgeSize + ' !important;">P</div><div class="mc-pride-text" style="font-size:' + prideTextSize + ' !important;">' + escapeHtml(data.mediaPrideP || 'Please use quiet voices') + '</div></div>' +
+        '            <div class="mc-pride-item"><div class="mc-pride-badge" style="font-size:' + prideBadgeSize + ' !important;">R</div><div class="mc-pride-text" style="font-size:' + prideTextSize + ' !important;">' + escapeHtml(data.mediaPrideR || 'Respect books & technology') + '</div></div>' +
+        '            <div class="mc-pride-item"><div class="mc-pride-badge" style="font-size:' + prideBadgeSize + ' !important;">I</div><div class="mc-pride-text" style="font-size:' + prideTextSize + ' !important;">' + escapeHtml(data.mediaPrideI || 'Inquire and ask questions') + '</div></div>' +
+        '            <div class="mc-pride-item"><div class="mc-pride-badge" style="font-size:' + prideBadgeSize + ' !important;">D</div><div class="mc-pride-text" style="font-size:' + prideTextSize + ' !important;">' + escapeHtml(data.mediaPrideD || 'Do return materials on time') + '</div></div>' +
+        '            <div class="mc-pride-item"><div class="mc-pride-badge" style="font-size:' + prideBadgeSize + ' !important;">E</div><div class="mc-pride-text" style="font-size:' + prideTextSize + ' !important;">' + escapeHtml(data.mediaPrideE || 'Explore new ideas & genres') + '</div></div>' +
+        '          </div>' +
+        '        </div>' +
+        '      </div>' +
+        '    </div>' +
+        '    <div class="mc-card card-flyer" style="flex:1; display:flex; flex-direction:column; background:rgba(255,255,255,0.95); border-radius:18px; box-shadow:0 10px 25px rgba(0,0,0,0.15); overflow:hidden;">' +
+        '      <div class="mc-card-title" style="font-size:' + cardTitleSize + ' !important;">📄 MEDIA ANNOUNCEMENTS</div>' +
+        '      <div class="mc-card-body" style="flex:1; display:flex; align-items:center; justify-content:center; padding:12px; min-height:0; overflow:hidden;">' +
+                 flyerHtml +
+        '      </div>' +
+        '    </div>' +
+        '  </div>' +
+        '  <div class="slp-frame-bottom"></div>' +
+        '</div>';
+    }
+
+    /* ==========================================================================
+    4B. MEDIA CENTER BOOKS SCREEN (?screen=mediacenterbooks)
+    ========================================================================== */
+    function renderMediaCenterBooks(root, data) {
+      var logoUrl = 'https://resources.finalsite.net/images/f_auto,q_auto,t_image_size_6/v1756395496/slpschoolsorg/amh2h2pn704tof9bg1ht/Oriolelogo.png';
+
+      var headerTitleSize    = '2.4rem';
+      var headerSubtitleSize = '1.8rem';
+      var cardTitleSize      = '1.5rem';
+      var bookTitleSize      = '1.3rem';
+      var bookAuthorSize     = '1.1rem';
+      var bookCoverMaxHeight = '240px';
+      var bookFallbackSize   = '1.1rem';
+
+      var booksHtml = '';
+      var books = data.books || [];
+      if (typeof books === 'string') {
+        try { books = JSON.parse(books); } catch(e) { books = []; }
+      }
+
+      for (var i = 0; i < 6; i++) {
+        var book = books[i] || {};
+        var cover = formatImageUrl(book.cover || book.img || book.image || '');
+        var title = escapeHtml(book.title || '');
+        var author = escapeHtml(book.author || '');
+
+        if (cover) {
+          booksHtml += '<div class="mc-book-card" style="display:flex; flex-direction:column; align-items:center; text-align:center;">' +
+                       '  <img src="' + cover + '" class="mc-book-cover" style="max-height:' + bookCoverMaxHeight + '; object-fit:contain; border-radius:8px;" alt="Book Cover">' +
+                       '  <div class="mc-book-details">' +
+                       '    <div class="mc-book-title" style="font-size:' + bookTitleSize + ' !important;">' + title + '</div>' +
+                       '    <div class="mc-book-author" style="font-size:' + bookAuthorSize + ' !important;">' + author + '</div>' +
+                       '  </div>' +
+                       '</div>';
+        } else if (title) {
+          booksHtml += '<div class="mc-book-card" style="justify-content:center; text-align:center;">' +
+                       '  <div class="mc-book-title" style="font-size:' + bookTitleSize + ' !important;">' + title + '</div>' +
+                       '  <div class="mc-book-author" style="font-size:' + bookAuthorSize + ' !important;">' + author + '</div>' +
+                       '</div>';
+        } else {
+          booksHtml += '<div class="mc-book-card" style="justify-content:center;">' +
+                       '  <div class="mc-book-title" style="font-size:' + bookFallbackSize + ' !important; color:#64748b;">📚 Available in Library</div>' +
+                       '</div>';
+        }
+      }
+
+      root.innerHTML =
+        '<div class="mc-container" style="min-height:100vh; display:flex; flex-direction:column; box-sizing:border-box;">' +
+        '  <div class="slp-frame-top"></div>' +
+        '  <div class="mc-header">' +
+        '    <div></div>' +
+        '    <div class="mc-banner">' +
+        '      <h1 style="font-size:' + headerTitleSize + ' !important;">PETER HOBART MEDIA CENTER</h1>' +
+        '      <p style="font-size:' + headerSubtitleSize + ' !important;">NEW BOOKS & RECOMMENDED READS</p>' +
+        '    </div>' +
+        '    <img src="' + logoUrl + '" class="mc-logo-img" style="transform: scaleX(-1);" alt="Oriole Logo">' +
+        '  </div>' +
+        '  <div class="mc-body" style="flex:1; padding:20px; min-height:0;">' +
+        '    <div class="mc-card card-books" style="height:100%; display:flex; flex-direction:column; background:rgba(255,255,255,0.95); border-radius:18px; box-shadow:0 10px 25px rgba(0,0,0,0.15); overflow:hidden;">' +
+        '      <div class="mc-card-title" style="font-size:' + cardTitleSize + ' !important;">📖 NEW BOOKS & RECOMMENDED READS</div>' +
+        '      <div class="mc-card-body" style="flex:1; padding:20px; min-height:0;"><div class="mc-books-grid">' + booksHtml + '</div></div>' +
+        '    </div>' +
+        '  </div>' +
+        '  <div class="slp-frame-bottom"></div>' +
+        '</div>';
+    }
+
+    /* ==========================================================================
+    5. PHOTO SCREEN (?screen=photo)
+    ========================================================================== */
+    function renderPhotoScreen(root, data) {
+      var photos = data.photos || data.images || [];
+      if (typeof photos === 'string') {
+        try { photos = JSON.parse(photos); } catch(e) { photos = []; }
+      }
+
+      var title = escapeHtml(data.title || 'PETER HOBART PHOTO GALLERY');
+      var logoUrl = 'https://resources.finalsite.net/images/f_auto,q_auto,t_image_size_6/v1756395496/slpschoolsorg/amh2h2pn704tof9bg1ht/Oriolelogo.png';
+
+      if (!photos || photos.length === 0) {
+        root.innerHTML =
+          '<div class="pho-container" style="min-height:100vh; display:flex; flex-direction:column; box-sizing:border-box;">' +
+          '  <div class="pho-header"><div class="pho-title">' + title + '</div><img src="' + logoUrl + '" class="pho-logo-img" alt="Logo"></div>' +
+          '  <div style="flex:1; display:flex; align-items:center; justify-content:center; color:#94a3b8; font-size:1.5rem; font-weight:700;">' +
+          '    📷 No photos found in selected collection.' +
+          '  </div>' +
+          '</div>';
+        return;
+      }
+
+      var imgElements = photos.map(function(url, idx) {
+        var formattedUrl = formatImageUrl(typeof url === 'object' ? url.url : url);
+        return '<img src="' + formattedUrl + '" class="pho-img ' + (idx === 0 ? 'active' : '') + '" id="pho-slide-' + idx + '" alt="Photo">';
+      }).join('');
+
+      root.innerHTML =
+        '<div class="pho-container" style="min-height:100vh; display:flex; flex-direction:column; box-sizing:border-box;">' +
+        '  <div class="pho-header">' +
+        '    <div class="pho-title">' + title + '</div>' +
+        '    <img src="' + logoUrl + '" class="pho-logo-img" alt="Logo">' +
+        '  </div>' +
+        '  <div class="pho-grid">' +
+        '    <div class="pho-card" id="pho-container-box">' + imgElements + '</div>' +
+        '  </div>' +
+        '</div>';
+
+      var currentIndex = 0;
+      var intervalTime = parseInt(data.interval, 10) || 8000;
+
+      window.photoCarouselTimer = setInterval(function() {
+        var currentImg = document.getElementById('pho-slide-' + currentIndex);
+        if (currentImg) currentImg.classList.remove('active');
+
+        currentIndex = (currentIndex + 1) % photos.length;
+
+        var nextImg = document.getElementById('pho-slide-' + currentIndex);
+        if (nextImg) nextImg.classList.add('active');
+      }, intervalTime);
+    }
+
+    /* ==========================================================================
+    6. FALLBACK GENERIC SCREEN
+    ========================================================================== */
+    function renderGenericScreen(root, data) {
+      root.innerHTML =
+        '<div style="padding:40px; color:#ffffff; text-align:center; min-height:100vh; background:#0f172a; box-sizing:border-box;">' +
+        '  <h2 style="font-size:2rem; margin-bottom:12px;">Display Active</h2>' +
+        '  <p style="font-size:1.2rem; color:#94a3b8;">Screen ID: ' + escapeHtml(SCREEN_ID) + '</p>' +
+        '</div>';
+    }
+  </script>
+</body>
+</html>
